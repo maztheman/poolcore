@@ -10,8 +10,12 @@ add_library(poolcommon STATIC
   utils.cpp
 )
 
+poolcore_add_compile_definitions(poolcommon)
+
 target_link_libraries(poolcommon
   OpenSSL::SSL
   OpenSSL::Crypto
+  libp2p::all
+  poolcore_project_options
   ${BIGNUM_LIBRARIES}
 )

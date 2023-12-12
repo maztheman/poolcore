@@ -11,7 +11,7 @@
 #include "asyncio/asyncio.h"
 #include "asyncio/device.h"
 #include <thread>
-#include <tbb/concurrent_queue.h>
+#include "concurrentqueue.h"
 
 
 class ShareLogConfig {
@@ -76,7 +76,7 @@ private:
   asyncBase *_base;
   uint64_t _timeout;
   std::thread _thread;
-  
+
   PoolBackendConfig _cfg;
   CCoinInfo CoinInfo_;
   UserManager &UserMgr_;
@@ -104,7 +104,7 @@ private:
   void checkConfirmationsHandler();
   void payoutHandler();
   void checkBalanceHandler();
-  
+
   void onShare(CShare *share);
   void onUpdateDag(unsigned epochNumber, bool bigEpoch);
 

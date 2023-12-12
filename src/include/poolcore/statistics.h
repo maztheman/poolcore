@@ -11,7 +11,7 @@
 #include "poolcommon/serialize.h"
 #include "poolcommon/taskHandler.h"
 #include "asyncio/asyncio.h"
-#include <tbb/concurrent_queue.h>
+#include "concurrentqueue.h"
 #include <chrono>
 
 struct CShare;

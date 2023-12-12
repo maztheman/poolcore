@@ -6,8 +6,8 @@
 #include "poolcore/rocksdbBase.h"
 #include "poolcommon/uint256.h"
 #include "asyncio/asyncio.h"
-#include <tbb/concurrent_queue.h>
-#include <tbb/concurrent_hash_map.h>
+#include "concurrentqueue.h"
+#include <boost/unordered/concurrent_flat_map.hpp>
 #include <thread>
 #include <unordered_set>
 
@@ -419,7 +419,7 @@ private:
 
   asyncBase *Base_;
   aioUserEvent *TaskQueueEvent_;
-  tbb::concurrent_queue<Task*> Tasks_;
+  moodycamel::ConcurrentQueue<Task*> Tasks_;
   kvdb<rocksdbBase> UsersDb_;
   kvdb<rocksdbBase> UserFeePlanDb_;
   kvdb<rocksdbBase> UserSettingsDb_;
@@ -431,10 +431,10 @@ private:
 
   // Cached data structures
   // Concurrent access structures
-  tbb::concurrent_hash_map<std::string, UsersRecord> UsersCache_;
-  tbb::concurrent_hash_map<uint512, UserSessionRecord, TbbHash<512>> SessionsCache_;
-  tbb::concurrent_hash_map<std::string, UserSettingsRecord> SettingsCache_;
-  tbb::concurrent_hash_map<std::string, FeePlan> FeePlanCache_;
+  boost::concurrent_flat_map<std::string, UsersRecord> UsersCache_;
+  boost::concurrent_flat_map<uint512, UserSessionRecord, TbbHash<512>> SessionsCache_;
+  boost::concurrent_flat_map<std::string, UserSettingsRecord> SettingsCache_;
+  boost::concurrent_flat_map<std::string, FeePlan> FeePlanCache_;
 
   // Thread local structures
   std::unordered_map<uint512, UserActionRecord> ActionsCache_;

@@ -1,11 +1,13 @@
 #pragma once
 
 #include "coroutineJoin.h"
-#include "tbb/concurrent_queue.h"
+#include "concurrentqueue.h"
 #include "asyncio/asyncio.h"
 
 struct aioUserEvent;
 struct asyncBase;
+
+
 
 template<typename ObjectTy>
 class Task {
@@ -31,7 +33,7 @@ public:
   }
 
   void push(Task<ObjectTy> *task) {
-    TaskQueue_.push(task);
+    TaskQueue_.enqueue(task);
     userEventActivate(TaskQueueEvent_);
   }
 
@@ -40,7 +42,7 @@ private:
     Task<ObjectTy> *task;
     bool shutdownRequested = false;
     for (;;) {
-      while (TaskQueue_.try_pop(task)) {
+      while (TaskQueue_.try_dequeue(task)) {
         std::unique_ptr<Task<ObjectTy>> taskHolder(task);
         if (!task) {
           shutdownRequested = true;
@@ -57,7 +59,7 @@ private:
 
 private:
   ObjectTy *Object_;
-  tbb::concurrent_queue<Task<ObjectTy>*> TaskQueue_;
+  moodycamel::ConcurrentQueue<Task<ObjectTy>*> TaskQueue_;
   aioUserEvent *TaskQueueEvent_;
 
 public:

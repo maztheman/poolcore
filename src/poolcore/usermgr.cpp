@@ -5,6 +5,8 @@
 #include <openssl/sha.h>
 #include <regex>
 #include "asyncio/smtp.h"
+#include "poolcore/backendData.h"
+#include <optional>
 
 static bool validEmail(const std::string &email)
 {
@@ -233,7 +235,7 @@ UserManager::UserManager(const std::filesystem::path &dbPath) :
   TaskQueueEvent_ = newUserEvent(Base_, 0, [](aioUserEvent*, void *arg) {
     Task *task = nullptr;
     UserManager *userMgr = static_cast<UserManager*>(arg);
-    while (userMgr->Tasks_.try_pop(task))
+    while (userMgr->Tasks_.try_dequeue(task))
       task->run();
   }, this);
 }
@@ -332,7 +334,7 @@ void UserManager::buildFeePlanRecord(const std::string &feePlanId, const FeePlan
 
 void UserManager::collectLinkedFeePlans(const std::string &userId, std::unordered_set<std::string> &plans)
 {
-  for (const auto &plan: FeePlanCache_) {
+  FeePlanCache_.visit_all([&](auto& plan) {
     for (const auto &pair: plan.second.Default) {
       if (pair.UserId == userId)
         plans.insert(plan.first);
@@ -343,7 +345,7 @@ void UserManager::collectLinkedFeePlans(const std::string &userId, std::unordere
           plans.insert(plan.first);
       }
     }
-  }
+  });
 }
 
 void UserManager::userManagerMain()
@@ -371,7 +373,7 @@ void UserManager::userManagerCleanup()
     rocksdbBase::PartitionBatchType sessionBatch = UserSessionsDb_.batch("default");
     rocksdbBase::PartitionBatchType actionBatch = UserActionsDb_.batch("default");
 
-    for (const auto &session: SessionsCache_) {
+    SessionsCache_.visit_all([&](auto& session) {
       if (currentTime - session.second.LastAccessTime >= SessionLifeTime_) {
         sessionIdForDelete.push_back(session.second.Id);
         LoginSessionMap_.erase(session.second.Login);
@@ -380,7 +382,7 @@ void UserManager::userManagerCleanup()
         UserSessionsDb_.put(sessionBatch, session.second);
         updatedSessions++;
       }
-    }
+    });
 
     for (const auto &action: ActionsCache_) {
       if (currentTime - action.second.CreationDate >= ActionLifeTime_) {
@@ -389,11 +391,11 @@ void UserManager::userManagerCleanup()
         UserActionsDb_.deleteRow(actionBatch, action.second);
         if (action.second.Type == UserActionRecord::UserActivate) {
           // Delete not activated user record
-          tbb::concurrent_hash_map<std::string, UsersRecord>::accessor accessor;
-          if (UsersCache_.find(accessor, action.second.Login)) {
-            AllEmails_.erase(accessor->second.EMail);
-            UsersDb_.deleteRow(accessor->second);
-            UsersCache_.erase(accessor);
+          if (UsersCache_.visit(action.second.Login, [&, this](auto& val) {
+            AllEmails_.erase(val.second.EMail);
+            UsersDb_.deleteRow(val.second);
+          })) {
+            UsersCache_.erase(action.second.Login);
             usersDeletedCount++;
           }
         }
@@ -414,7 +416,7 @@ void UserManager::userManagerCleanup()
 
 void UserManager::startAsyncTask(Task *task)
 {
-  Tasks_.push(task);
+  Tasks_.enqueue(task);
   userEventActivate(TaskQueueEvent_);
 }
 
@@ -429,16 +431,15 @@ void UserManager::actionImpl(const uint512 &id, const std::string &newPassword, 
   UserActionRecord &actionRecord = It->second;
   UsersRecord userRecord;
 
+  if (!UsersCache_.visit(actionRecord.Login, [&](auto& val) {
+    userRecord = val.second;
+  }))
   {
-    decltype(UsersCache_)::const_accessor accessor;
-    if (!UsersCache_.find(accessor, actionRecord.Login)) {
-      callback("unknown_login");
-      actionRemove(actionRecord);
-      return;
-    }
-
-    userRecord = accessor->second;
+    callback("unknown_login");
+    actionRemove(actionRecord);
+    return;
   }
+
 
   // Don't allow special users
   if (actionRecord.Login == "admin" || actionRecord.Login == "observer") {
@@ -512,13 +513,10 @@ void UserManager::actionImpl(const uint512 &id, const std::string &newPassword, 
   }
 
   if (userRecordUpdated) {
-    {
-      decltype(UsersCache_)::accessor accessor;
-      if (UsersCache_.find(accessor, actionRecord.Login))
-        accessor->second = userRecord;
-    }
-
-    UsersDb_.put(userRecord);
+    if (UsersCache_.visit(actionRecord.Login, [&](auto& val) {
+      val.second = userRecord;
+    }))
+      UsersDb_.put(userRecord);
   }
 
   if (actionNeedRemove)
@@ -535,9 +533,10 @@ void UserManager::changePasswordInitiateImpl(const std::string &login, Task::Def
   }
 
   std::string emailAddress;
-  decltype (UsersCache_)::const_accessor accessor;
-  if (UsersCache_.find(accessor, login)) {
-    emailAddress = accessor->second.EMail;
+
+  if (UsersCache_.visit(login, [&](auto& val) {
+    emailAddress = val.second.EMail;
+  })) {
   } else {
     callback("unknown_login");
     return;
@@ -576,22 +575,18 @@ void UserManager::userChangePasswordForceImpl(const std::string &sessionId, cons
 
   UsersRecord userRecord;
 
-  {
-    decltype(UsersCache_)::const_accessor accessor;
-    if (!UsersCache_.find(accessor, login)) {
-      callback("unknown_login");
-      return;
-    }
-
-    userRecord = accessor->second;
+  if (!UsersCache_.visit(login, [&](auto& val) {
+    userRecord = val.second;
+  })) {
+    callback("unknown_login");
+    return;
   }
 
   userRecord.PasswordHash = generateHash(login, newPassword);
-  {
-    decltype(UsersCache_)::accessor accessor;
-    if (UsersCache_.find(accessor, login))
-      accessor->second = userRecord;
-  }
+
+  UsersCache_.visit(login, [&](auto& val) {
+    val.second = userRecord;
+  });
 
   UsersDb_.put(userRecord);
   callback("ok");
@@ -758,27 +753,27 @@ void UserManager::resendEmailImpl(Credentials &credentials, Task::DefaultCb call
 {
   std::string email;
   {
-    decltype (UsersCache_)::const_accessor accessor;
-    if (!UsersCache_.find(accessor, credentials.Login)) {
+    std::optional<const UsersRecord*> record;
+    if (!UsersCache_.visit(credentials.Login, [&](auto& val) {
+      record = &val.second;
+    })) {
       callback("invalid_password");
       return;
     }
 
-    const UsersRecord &record = accessor->second;
-
     // Check password
-    if (record.PasswordHash != generateHash(credentials.Login, credentials.Password)) {
+    if (record.value()->PasswordHash != generateHash(credentials.Login, credentials.Password)) {
       callback("invalid_password");
       return;
     }
 
     // Check activation
-    if (record.IsActive) {
+    if (record.value()->IsActive) {
       callback("user_already_active");
       return;
     }
 
-    email = record.EMail;
+    email = record.value()->EMail;
   }
 
   // Invalidate current action
@@ -860,33 +855,33 @@ void UserManager::loginImpl(Credentials &credentials, UserLoginTask::Cb callback
   bool isReadOnly = false;
 
   {
-    decltype (UsersCache_)::const_accessor accessor;
-    if (!UsersCache_.find(accessor, credentials.Login)) {
+    std::optional<const UsersRecord*> record;
+    if (!UsersCache_.visit(credentials.Login, [&](auto& val) {
+      record = &val.second;
+    })) {
       callback("", "invalid_password", false);
       return;
     }
 
-    const UsersRecord &record = accessor->second;
-
     // Check password
-    if (record.PasswordHash != generateHash(credentials.Login, credentials.Password)) {
+    if (record.value()->PasswordHash != generateHash(credentials.Login, credentials.Password)) {
       callback("", "invalid_password", false);
       return;
     }
 
     // Check 2fa
-    if (!check2fa(record.TwoFactorAuthData, credentials.TwoFactor)) {
+    if (!check2fa(record.value()->TwoFactorAuthData, credentials.TwoFactor)) {
       callback("", "2fa_invalid", false);
       return;
     }
 
     // Check activation
-    if (!record.IsActive) {
+    if (!record.value()->IsActive) {
       callback("", "user_not_active", false);
       return;
     }
 
-    isReadOnly = record.IsReadOnly;
+    isReadOnly = record.value()->IsReadOnly;
   }
 
   auto It = LoginSessionMap_.find(credentials.Login);
@@ -909,13 +904,13 @@ void UserManager::logoutImpl(const uint512 &sessionId, Task::DefaultCb callback)
 {
   UserSessionRecord sessionRecord;
   {
-    decltype (SessionsCache_)::const_accessor sessionAccessor;
-    if (!SessionsCache_.find(sessionAccessor, sessionId)) {
+
+    if (!SessionsCache_.visit(sessionId, [&](auto& val) {
+      sessionRecord = val.second;
+    })) {
       callback("unknown_id");
       return;
     }
-
-    sessionRecord = sessionAccessor->second;
   }
 
   sessionRemove(sessionRecord);
@@ -933,14 +928,14 @@ void UserManager::updateCredentialsImpl(const std::string &sessionId, const std:
   UsersRecord record;
 
   {
-    decltype (UsersCache_)::accessor accessor;
-    if (!UsersCache_.find(accessor, login)) {
+
+    if (!UsersCache_.visit(login, [&](auto& val) {
+      val.second.Name = credentials.Name;
+      record = val.second;
+    })) {
       callback("unknown_login");
       return;
     }
-
-    accessor->second.Name = credentials.Name;
-    record = accessor->second;
   }
 
   UsersDb_.put(record);
@@ -951,13 +946,16 @@ void UserManager::updateSettingsImpl(const UserSettingsRecord &settings, const s
 {
   // check 2fa
   {
-    decltype (UsersCache_)::accessor accessor;
-    if (!UsersCache_.find(accessor, settings.Login)) {
+    std::optional<std::string> twofa;
+
+    if (!UsersCache_.visit(settings.Login, [&](auto& val) {
+      twofa = val.second.TwoFactorAuthData;
+    })) {
       callback("unknown_login");
       return;
     }
 
-    if (!check2fa(accessor->second.TwoFactorAuthData, totp)) {
+    if (!check2fa(twofa.value(), totp)) {
       callback("2fa_invalid");
       return;
     }
@@ -968,11 +966,11 @@ void UserManager::updateSettingsImpl(const UserSettingsRecord &settings, const s
   key.push_back('\0');
   key.append(settings.Coin);
   {
-    decltype (SettingsCache_)::accessor accessor;
-    if (SettingsCache_.find(accessor, key)) {
-      oldSettings = accessor->second;
-      accessor->second = settings;
-    } else {
+
+    if (!SettingsCache_.visit(key, [&](auto& val) {
+      oldSettings = val.second;
+      val.second = settings;
+    })) {
       SettingsCache_.insert(std::make_pair(key, settings));
     }
   }
@@ -995,7 +993,7 @@ void UserManager::enumerateUsersImpl(const std::string &sessionId, EnumerateUser
   }
 
   if (login == "admin" || login == "observer") {
-    for (const auto &record: UsersCache_) {
+    UsersCache_.visit_all([&](auto& record) {
       Credentials &credentials = result.emplace_back();
       credentials.Login = record.second.Login;
       credentials.Name = record.second.Name;
@@ -1004,13 +1002,13 @@ void UserManager::enumerateUsersImpl(const std::string &sessionId, EnumerateUser
       credentials.IsActive = record.second.IsActive;
       credentials.IsReadOnly = record.second.IsReadOnly;
       credentials.FeePlan = record.second.FeePlanId;
-    }
+    });
   } else {
     std::unordered_set<std::string> linkedFeePlans;
     collectLinkedFeePlans(login, linkedFeePlans);
-    for (const auto &record: UsersCache_) {
+    UsersCache_.visit_all([&](auto& record) {
       if (!linkedFeePlans.count(record.second.FeePlanId))
-        continue;
+        return;
 
       Credentials &credentials = result.emplace_back();
       credentials.Login = record.second.Login;
@@ -1020,7 +1018,7 @@ void UserManager::enumerateUsersImpl(const std::string &sessionId, EnumerateUser
       credentials.IsActive = record.second.IsActive;
       credentials.IsReadOnly = record.second.IsReadOnly;
       credentials.FeePlan = record.second.FeePlanId;
-    }
+    });
   }
 
   callback("ok", result);
@@ -1060,14 +1058,14 @@ void UserManager::changeFeePlanImpl(const std::string &sessionId, const std::str
 
   UsersRecord record;
   {
-    decltype (UsersCache_)::accessor accessor;
-    if (!UsersCache_.find(accessor, login)) {
+
+    if (!UsersCache_.visit(login, [&](auto& val) {
+      val.second.FeePlanId = newFeePlan;
+      record = val.second;
+    })) {
       callback("unknown_login");
       return;
     }
-
-    accessor->second.FeePlanId = newFeePlan;
-    record = accessor->second;
   }
 
   UsersDb_.put(record);
@@ -1091,18 +1089,19 @@ void UserManager::activate2faInitiateImpl(const std::string &sessionId, const st
   // Check current 2fa status
   std::string emailAddress;
   {
-    decltype (UsersCache_)::accessor accessor;
-    if (!UsersCache_.find(accessor, login)) {
+    std::string twofa;
+    if (!UsersCache_.visit(login, [&](auto& val) {
+      twofa = val.second.TwoFactorAuthData;
+      emailAddress = val.second.EMail;
+    })) {
       callback("unknown_login", "");
       return;
     }
 
-    if (!accessor->second.TwoFactorAuthData.empty()) {
+    if (!twofa.empty()) {
       callback("2fa_already_activated", "");
       return;
     }
-
-    emailAddress = accessor->second.EMail;
   }
 
   // Generate new 2fa key
@@ -1147,18 +1146,19 @@ void UserManager::deactivate2faInitiateImpl(const std::string &sessionId, const 
   // Check current 2fa status
   std::string emailAddress;
   {
-    decltype (UsersCache_)::accessor accessor;
-    if (!UsersCache_.find(accessor, login)) {
+    std::string twofa;
+    if (!UsersCache_.visit(login, [&](auto& val) {
+      twofa = val.second.TwoFactorAuthData;
+      emailAddress = val.second.EMail;
+    })) {
       callback("unknown_login");
       return;
     }
 
-    if (accessor->second.TwoFactorAuthData.empty()) {
+    if (twofa.empty()) {
       callback("2fa_not_activated");
       return;
     }
-
-    emailAddress = accessor->second.EMail;
   }
 
   // Create action
@@ -1186,14 +1186,14 @@ bool UserManager::checkUser(const std::string &login)
 
 bool UserManager::checkPassword(const std::string &login, const std::string &password)
 {
-  decltype (UsersCache_)::const_accessor accessor;
-  if (!UsersCache_.find(accessor, login))
+  std::optional<const UsersRecord*> record;
+  if (!UsersCache_.visit(login, [&](auto& val) {
+    record = &val.second;
+  }))
     return false;
 
-  const UsersRecord &record = accessor->second;
-
   // Check password
-  return record.PasswordHash == generateHash(login, password);
+  return record.value()->PasswordHash == generateHash(login, password);
 }
 
 bool UserManager::validateSession(const std::string &id, const std::string &targetLogin, std::string &resultLogin, bool needWriteAccess)
@@ -1201,11 +1201,12 @@ bool UserManager::validateSession(const std::string &id, const std::string &targ
   bool isReadOnly = false;
   time_t currentTime = time(nullptr);
   {
-    decltype (SessionsCache_)::accessor accessor;
-    if (SessionsCache_.find(accessor, uint512S(id))) {
-      resultLogin = accessor->second.Login;
-      isReadOnly = accessor->second.IsReadOnly;
-      accessor->second.updateLastAccessTime(currentTime);
+
+    if (SessionsCache_.visit(uint512S(id), [&](auto& val) {
+      resultLogin = val.second.Login;
+      isReadOnly = val.second.IsReadOnly;
+      val.second.updateLastAccessTime(currentTime);
+    })) {
     } else {
       return false;
     }
@@ -1226,11 +1227,13 @@ bool UserManager::validateSession(const std::string &id, const std::string &targ
     std::unordered_set<std::string> linkedFeePlans;
     collectLinkedFeePlans(resultLogin, linkedFeePlans);
 
-    decltype (UsersCache_)::const_accessor accessor;
-    if (!UsersCache_.find(accessor, targetLogin))
+    std::string feePlanId;
+    if (!UsersCache_.visit(targetLogin, [&](auto& val) {
+      feePlanId = val.second.FeePlanId;
+    }))
       return false;
 
-    if (linkedFeePlans.count(accessor->second.FeePlanId) && !needWriteAccess) {
+    if (linkedFeePlans.count(feePlanId) && !needWriteAccess) {
       resultLogin = targetLogin;
       return true;
     } else {
@@ -1243,14 +1246,14 @@ bool UserManager::validateSession(const std::string &id, const std::string &targ
 
 bool UserManager::getUserCredentials(const std::string &login, Credentials &out)
 {
-  decltype (UsersCache_)::const_accessor accessor;
-  if (UsersCache_.find(accessor, login)) {
-    out.Name = accessor->second.Name;
-    out.EMail = accessor->second.EMail;
-    out.RegistrationDate = accessor->second.RegistrationDate;
-    out.IsActive = accessor->second.IsActive;
-    out.IsReadOnly = accessor->second.IsReadOnly;
-    out.HasTwoFactor = !accessor->second.TwoFactorAuthData.empty();
+  if (UsersCache_.visit(login, [&](auto& val) {
+    out.Name = val.second.Name;
+    out.EMail = val.second.EMail;
+    out.RegistrationDate = val.second.RegistrationDate;
+    out.IsActive = val.second.IsActive;
+    out.IsReadOnly = val.second.IsReadOnly;
+    out.HasTwoFactor = !val.second.TwoFactorAuthData.empty();
+  })) {
     return true;
   } else {
     return false;
@@ -1263,9 +1266,9 @@ bool UserManager::getUserCoinSettings(const std::string &login, const std::strin
   key.push_back('\0');
   key.append(coin);
 
-  decltype (SettingsCache_)::const_accessor accessor;
-  if (SettingsCache_.find(accessor, key)) {
-    settings = accessor->second;
+  if (SettingsCache_.visit(key, [&](auto& val) {
+    settings = val.second;
+  })) {
     return true;
   } else {
     return false;
@@ -1275,11 +1278,14 @@ bool UserManager::getUserCoinSettings(const std::string &login, const std::strin
 std::string UserManager::getFeePlanId(const std::string &login)
 {
   static const std::string defaultPlan = "default";
-  decltype (UsersCache_)::const_accessor accessor;
-  if (UsersCache_.find(accessor, login))
-    return !accessor->second.FeePlanId.empty() ? accessor->second.FeePlanId : defaultPlan;
-  else
+
+  if (std::string rc; UsersCache_.visit(login, [&](auto& val) {
+    rc = !val.second.FeePlanId.empty() ? val.second.FeePlanId : defaultPlan;
+  })) {
+    return rc;
+  } else {
     return "default";
+  }
 }
 
 bool UserManager::getFeePlan(const std::string &sessionId, const std::string &feePlanId, std::string &status, UserFeePlanRecord &result)
@@ -1290,10 +1296,11 @@ bool UserManager::getFeePlan(const std::string &sessionId, const std::string &fe
     return false;
   }
 
-  decltype (FeePlanCache_)::const_accessor accessor;
-  if (FeePlanCache_.find(accessor, feePlanId)) {
-    buildFeePlanRecord(accessor->first, accessor->second, result);
+
+  if (FeePlanCache_.visit(feePlanId, [&](auto& val) {
+    buildFeePlanRecord(val.first, val.second, result);
     status = "ok";
+  })) {
     return true;
   } else {
     status = "unknown_fee_plan";
@@ -1309,8 +1316,9 @@ bool UserManager::enumerateFeePlan(const std::string &sessionId, std::string &st
     return false;
   }
 
-  for (const auto &plan: FeePlanCache_)
+  FeePlanCache_.visit_all([&](auto& plan) {
     buildFeePlanRecord(plan.first, plan.second, result.emplace_back());
+  });
 
   std::sort(result.begin(), result.end(), [](const UserFeePlanRecord &l, const UserFeePlanRecord &r) { return l.FeePlanId < r.FeePlanId; });
 
@@ -1320,11 +1328,13 @@ bool UserManager::enumerateFeePlan(const std::string &sessionId, std::string &st
 
 UserManager::UserFeeConfig UserManager::getFeeRecord(const std::string &feePlanId, const std::string &coin)
 {
-  decltype (FeePlanCache_)::const_accessor accessor;
-  if (FeePlanCache_.find(accessor, feePlanId)) {
-    auto It = accessor->second.CoinSpecificFee.find(coin);
-    return It != accessor->second.CoinSpecificFee.end() ? It->second : accessor->second.Default;
+
+  if (UserFeeConfig ufc; FeePlanCache_.visit(feePlanId, [&](auto& val) {
+    auto It = val.second.CoinSpecificFee.find(coin);
+    ufc = It != val.second.CoinSpecificFee.end() ? It->second : val.second.Default;
+  })) {
+    return ufc;
   } else {
-    return UserFeeConfig();
+    return ufc;
   }
 }

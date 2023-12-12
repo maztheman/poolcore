@@ -1,9 +1,10 @@
 #pragma once
 
+#include "concurrentqueue.h"
 #include "poolcommon/intrusive_ptr.h"
 #include "poolcore/complexMiningStats.h"
 #include "asyncio/asyncio.h"
-#include "tbb/concurrent_queue.h"
+#include "concurrentqueue.h"
 #include <atomic>
 #include <thread>
 #include <vector>
@@ -31,7 +32,7 @@ public:
 
 public:
   void startAsyncTask(unsigned workerId, Task *task) {
-    Threads_[workerId].TaskQueue.push(task);
+    Threads_[workerId].TaskQueue.enqueue(task);
     userEventActivate(Threads_[workerId].NewTaskEvent);
   }
 
@@ -44,7 +45,7 @@ private:
     asyncBase *Base;
     unsigned Id;
     std::thread Thread;
-    tbb::concurrent_queue<Task*> TaskQueue;
+    moodycamel::ConcurrentQueue<Task*> TaskQueue;
     aioUserEvent *NewTaskEvent;
   };
 

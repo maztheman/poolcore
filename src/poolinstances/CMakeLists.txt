@@ -1,20 +1,24 @@
-include_directories(${CMAKE_CURRENT_BINARY_DIR})
-
 add_library(poolinstances STATIC
   fabric.cpp
   protocol.proto
 )
 
-target_include_directories(poolinstances PUBLIC ${RAPIDJSON_INCLUDE_DIRECTORY})
+poolcore_add_compile_definitions(poolinstances)
 
-target_link_libraries(poolinstances
-  TBB::tbb
+target_include_directories(poolinstances PUBLIC ${RAPIDJSON_INCLUDE_DIRECTORY} ${CMAKE_CURRENT_BINARY_DIR})
+
+target_link_libraries(poolinstances PUBLIC
+  Boost::unordered
   OpenSSL::SSL
   OpenSSL::Crypto
-  RocksDB::rocksdb
+  rocksdb
+  libp2p::all
   protobuf::libprotobuf
+  poolcore_project_options
   ${BIGNUM_LIBRARIES}
 )
+
+include(${protobuf_BINARY_DIR}/cmake/protobuf/protobuf-generate.cmake)
 
 protobuf_generate(TARGET poolinstances)
 

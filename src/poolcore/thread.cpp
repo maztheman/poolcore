@@ -9,8 +9,8 @@
  
 static std::atomic<unsigned> threadCounter = 0;
 // Use 8-byte aligned TLS
-static __tls uint64_t globalThreadId;
-static __tls uint64_t localThreadId;
+static thread_local uint64_t globalThreadId;
+static thread_local uint64_t localThreadId;
 
 void InitializeWorkerThread()
 {

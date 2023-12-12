@@ -26,10 +26,14 @@ add_library(blockmaker STATIC
   zec.cpp
 )
 
+poolcore_add_compile_definitions(blockmaker)
+
 target_link_libraries(blockmaker
   OpenSSL::SSL
   OpenSSL::Crypto
-  libsodium::libsodium
+  poolcore_libsodium
+  libp2p::all
+  poolcore_project_options
   ${BIGNUM_LIBRARIES}
   poolinstances
 )

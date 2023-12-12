@@ -19,11 +19,16 @@ add_library(poolcore STATIC
   usermgr.cpp
 )
 
-target_include_directories(poolcore PUBLIC ${RAPIDJSON_INCLUDE_DIRECTORY})
+poolcore_add_compile_definitions(poolcore)
+
+target_include_directories(poolcore PUBLIC ${rapidjson_SOURCE_DIR}/include  ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+
 
 target_link_libraries(poolcore
-  TBB::tbb
   OpenSSL::SSL
   OpenSSL::Crypto
-  RocksDB::rocksdb
+  rocksdb
+  libp2p::all
+  Boost::unordered
+  poolcore_project_options
 )

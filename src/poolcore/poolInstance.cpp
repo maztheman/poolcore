@@ -48,7 +48,7 @@ void CThreadPool::runTaskQueue(ThreadData &data)
 {
   Task *t;
   std::unique_ptr<Task> task;
-  while (data.TaskQueue.try_pop(t)) {
+  while (data.TaskQueue.try_dequeue(t)) {
     task.reset(t);
     t->run(data.Id);
   }

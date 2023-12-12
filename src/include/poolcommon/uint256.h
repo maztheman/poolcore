@@ -164,6 +164,10 @@ struct TbbHash {
     return s.GetUint64(0);
   }
 
+  size_t operator()(const base_blob<BitSize>& s) const {
+    return s.GetUint64(0);
+  }
+
   bool equal(const base_blob<BitSize> &s1, const base_blob<BitSize> &s2) const {
     return s1 == s2;
   }

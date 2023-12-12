@@ -831,7 +831,7 @@ CNetworkClient::EOperationStatus CEthereumRpcClient::ethGetBlockByNumber(CConnec
     return EStatusProtocolError;
   }
 
-  rapidjson::Value &blockObject = document["result"].GetObject();
+  rapidjson::Value blockObject = document["result"].GetObject();
   if (!blockObject.HasMember("mixHash") || !blockObject["mixHash"].IsString() || blockObject["mixHash"].GetStringLength() != 66 ||
       !blockObject.HasMember("hash") || !blockObject["hash"].IsString() || blockObject["hash"].GetStringLength() != 66 ||
       !blockObject.HasMember("gasUsed") || !blockObject["gasUsed"].IsString() || blockObject["gasUsed"].GetStringLength() < 3) {
@@ -918,7 +918,7 @@ CNetworkClient::EOperationStatus CEthereumRpcClient::ethGetUncleByBlockNumberAnd
     return EStatusProtocolError;
   }
 
-  rapidjson::Value &blockObject = document["result"].GetObject();
+  rapidjson::Value blockObject = document["result"].GetObject();
   if (!blockObject.HasMember("mixHash") || !blockObject["mixHash"].IsString() || blockObject["mixHash"].GetStringLength() != 66 ||
       !blockObject.HasMember("hash") || !blockObject["hash"].IsString() || blockObject["hash"].GetStringLength() != 66 ||
       !blockObject.HasMember("gasUsed") || !blockObject["gasUsed"].IsString() || blockObject["gasUsed"].GetStringLength() < 3) {
